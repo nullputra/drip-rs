@@ -1,0 +1,22 @@
+on: [push, pull_request]
+
+name: min-version
+
+env:
+  MIN_SRV: "1.56.0"
+
+jobs:
+  min-version:
+    name: Minimum supported rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - name: Install `rust` toolchain (v${{ env.MIN_SRV }})
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.MIN_SRV }}
+          profile: minimal  # minimal component installation (ie, no documentation)
+      - name: Test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test

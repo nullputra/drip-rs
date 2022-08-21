@@ -1,0 +1,290 @@
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+name: release
+
+env:
+  TMP_DIR: temporary
+
+jobs:
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.release.outputs.upload_url }}
+      release_version: ${{ env.RELEASE_VERSION }}
+    steps:
+      - name: Get the release version from the tag
+        shell: bash
+        if: env.RELEASE_VERSION == ''
+        run: |
+          # Apparently, this is the right way to get a tag name. Really?
+          # See: https://github.community/t5/GitHub-Actions/How-to-get-just-the-tag-name/m-p/32167/highlight/true#M1027
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/}" >> ${GITHUB_ENV}
+          echo "RELEASE_VERSION: ${{ env.RELEASE_VERSION }}"
+      - name: Create GitHub release
+        id: release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.RELEASE_VERSION }}
+          release_name: ${{ env.RELEASE_VERSION }}
+
+  build-release:
+    name: Build release
+    needs: ["create-release"]
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { os: ubuntu-latest, target: arm-unknown-linux-gnueabihf, use-cross: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, use-cross: true }
+          - { os: ubuntu-latest, target: i686-unknown-linux-gnu, use-cross: true }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, use-cross: true }
+          # - { os: windows-latest , target: i686-pc-windows-gnu }  # error: linker `i686-w64-mingw32-gcc` not found
+          - { os: windows-latest, target: i686-pc-windows-msvc }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 1
+
+      - name: Install prerequisites
+        shell: bash
+        run: |
+          case ${{ matrix.job.target }} in
+            arm-unknown-linux-*)
+              sudo apt -y update
+              sudo apt -y install gcc-arm-linux-gnueabihf;;
+            aarch64-unknown-linux-gnu)
+              sudo apt -y update
+              sudo apt -y install gcc-aarch64-linux-gnu;;
+          esac
+
+      - name: Extract crate information
+        shell: bash
+        run: |
+          echo "PROJECT_NAME=$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)" >> ${GITHUB_ENV}
+          echo "PROJECT_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)" >> ${GITHUB_ENV}
+          echo "PROJECT_MAINTAINER=$(sed -n 's/^authors = \["\(.*\)"\]/\1/p' Cargo.toml)" >> ${GITHUB_ENV}
+          echo "PROJECT_DESC=$(sed -n 's/^description = "\(.*\)"/\1/p' Cargo.toml | head -n1)" >> ${GITHUB_ENV}
+          echo "PROJECT_HOMEPAGE=$(sed -n 's/^homepage = "\(.*\)"/\1/p' Cargo.toml)" >> ${GITHUB_ENV}
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.job.target }}
+          override: true
+          profile: minimal # minimal component installation (ie, no documentation)
+
+      - name: Show version information (gcc, rustup, rustc, cargo)
+        shell: bash
+        run: |
+          gcc --version || true
+          rustup -V
+          rustup toolchain list
+          rustup update
+          rustc -V
+          cargo -V
+
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: ${{ matrix.job.use-cross }}
+          command: build
+          args: --locked --release --target=${{ matrix.job.target }}
+
+      - name: Strip debug information from executable
+        id: strip
+        shell: bash
+        run: |
+          # Figure out suffix of binary
+          case ${{ matrix.job.target }} in
+            *-pc-windows-*) EXE_suffix=".exe";;
+            *) EXE_suffix="";;
+          esac;
+          # Figure out what strip tool to use if any
+          case ${{ matrix.job.target }} in
+            arm-unknown-linux-*) STRIP="arm-linux-gnueabihf-strip";;
+            aarch64-unknown-linux-gnu) STRIP="aarch64-linux-gnu-strip";;
+            *-pc-windows-msvc) STRIP="";;
+            *) STRIP="strip";;
+          esac
+          # Setup paths
+          BIN_DIR="${{ env.TMP_DIR }}/stripped-release-bin"
+          mkdir -p "${BIN_DIR}"
+          BIN_NAME="${{ env.PROJECT_NAME }}${EXE_suffix}"
+          BIN_PATH="${BIN_DIR}/${BIN_NAME}"
+          # Copy the release build binary to the result location
+          cp "target/${{ matrix.job.target }}/release/${BIN_NAME}" "${BIN_DIR}/"
+          # Also strip if possible
+          if [ -n "${STRIP}" ]; then
+            echo "STRIP: ${STRIP}"
+            "${STRIP}" "${BIN_PATH}"
+          fi
+          # Let subsequent steps know where to find the (stripped) bin
+          echo ::set-output name=BIN_PATH::${BIN_PATH}
+          echo "BIN_PATH: ${BIN_PATH}"
+          echo "> ls ${BIN_PATH}"
+          ls ${BIN_PATH}
+          echo ::set-output name=BIN_NAME::${BIN_NAME}
+          echo "BIN_NAME: ${BIN_NAME}"
+
+      - name: Create tarball
+        id: package
+        shell: bash
+        run: |
+          case ${{ matrix.job.target }} in
+            *-pc-windows-*) PKG_suffix=".zip";;
+            *) PKG_suffix=".tar.gz";;
+          esac
+          PKG_BASENAME="${{ env.PROJECT_NAME }}-v${PROJECT_VERSION}-${{ matrix.job.target }}"
+          echo "PKG_BASENAME: ${PKG_BASENAME}"
+          PKG_NAME="${PKG_BASENAME}${PKG_suffix}"
+          echo ::set-output name=PKG_NAME::${PKG_NAME}
+          echo "PKG_NAME: ${PKG_NAME}"
+          PKG_STAGING="${{ env.TMP_DIR }}/package"
+          ARCHIVE_DIR="${PKG_STAGING}/${PKG_BASENAME}"
+          AUTOCOMPLETE_DIR="${ARCHIVE_DIR}/autocomplete"
+          mkdir -p "${AUTOCOMPLETE_DIR}"
+          # Binary
+          cp "${{ steps.strip.outputs.BIN_PATH }}" "${ARCHIVE_DIR}/"
+          # README, LICENSE and CHANGELOG files
+          cp "README.md" "LICENSE" "${ARCHIVE_DIR}/"
+          # Autocompletion files
+          cp 'target/${{ matrix.job.target }}/release/build/${{ env.PROJECT_NAME }}'*/out/'${{ env.PROJECT_NAME }}.bash' "${AUTOCOMPLETE_DIR}/"
+          cp 'target/${{ matrix.job.target }}/release/build/${{ env.PROJECT_NAME }}'*/out/'${{ env.PROJECT_NAME }}.fish' "${AUTOCOMPLETE_DIR}/"
+          cp 'target/${{ matrix.job.target }}/release/build/${{ env.PROJECT_NAME }}'*/out/'_${{ env.PROJECT_NAME }}.ps1' "${AUTOCOMPLETE_DIR}/"
+          echo "> ls ${AUTOCOMPLETE_DIR}"
+          ls ${AUTOCOMPLETE_DIR}
+          # Base compressed package
+          pushd "${PKG_STAGING}/" >/dev/null
+          case ${{ matrix.job.target }} in
+            *-pc-windows-*) 7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2;;
+            *) tar czf "${PKG_NAME}" "${PKG_BASENAME}"/*;;
+          esac
+          popd >/dev/null
+          # Let subsequent steps know where to find the compressed package
+          PKG_PATH="${PKG_STAGING}/${PKG_NAME}"
+          echo ::set-output name=PKG_PATH::${PKG_PATH}
+          echo "PKG_PATH: ${PKG_PATH}"
+          echo "> ls ${PKG_STAGING}"
+          ls ${PKG_STAGING}
+      - name: Create Debian package
+        id: debian-package
+        shell: bash
+        if: startsWith(matrix.job.os, 'ubuntu')
+        run: |
+          COPYRIGHT_YEARS="2022 - "$(date "+%Y")
+          DPKG_STAGING="${{ env.TMP_DIR }}/debian-package"
+          DPKG_DIR="${DPKG_STAGING}/dpkg"
+          mkdir -p "${DPKG_DIR}"
+          case ${{ matrix.job.target }} in
+            *-musl)
+              DPKG_BASENAME="${{ env.PROJECT_NAME }}-musl"
+              DPKG_CONFLICTS=${{ env.PROJECT_NAME }};;
+            *)
+              DPKG_BASENAME="${{ env.PROJECT_NAME }}"
+              DPKG_CONFLICTS=${{ env.PROJECT_NAME }}-musl;;
+          esac
+          DPKG_VERSION=${PROJECT_VERSION}
+          unset DPKG_ARCH
+          case ${{ matrix.job.target }} in
+            aarch64-*-linux-*) DPKG_ARCH=arm64;;
+            arm-*-linux-*hf) DPKG_ARCH=armhf;;
+            i686-*-linux-*) DPKG_ARCH=i686;;
+            x86_64-*-linux-*) DPKG_ARCH=amd64;;
+            *) DPKG_ARCH=notset;;
+          esac;
+          DPKG_NAME="${DPKG_BASENAME}_${DPKG_VERSION}_${DPKG_ARCH}.deb"
+          echo ::set-output name=DPKG_NAME::${DPKG_NAME}
+          echo "DPKG_NAME: ${DPKG_NAME}"
+
+          # Binary
+          install -Dm755 "${{ steps.strip.outputs.BIN_PATH }}" "${DPKG_DIR}/usr/bin/${{ steps.strip.outputs.BIN_NAME }}"
+
+          # Autocompletion files
+          install -Dm644 'target/${{ matrix.job.target }}/release/build/${{ env.PROJECT_NAME }}'*/out/'${{ env.PROJECT_NAME }}.bash' "${DPKG_DIR}/usr/share/bash-completion/completions/${{ env.PROJECT_NAME }}"
+          install -Dm644 'target/${{ matrix.job.target }}/release/build/${{ env.PROJECT_NAME }}'*/out/'${{ env.PROJECT_NAME }}.fish' "${DPKG_DIR}/usr/share/fish/vendor_completions.d/${{ env.PROJECT_NAME }}.fish"
+
+          # README and LICENSE
+          install -Dm644 "README.md" "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/README.md"
+          install -Dm644 "LICENSE" "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/LICENSE"
+          cat > "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/copyright" <<EOF
+          Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+          Upstream-Name: ${{ env.PROJECT_NAME }}
+          Source: ${{ env.PROJECT_HOMEPAGE }}
+          Files: *
+          Copyright: ${COPYRIGHT_YEARS} ${{ env.PROJECT_MAINTAINER }}
+          License: CC0-1.0
+            CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE
+            LEGAL SERVICES. DISTRIBUTION OF THIS DOCUMENT DOES NOT CREATE AN
+            ATTORNEY-CLIENT RELATIONSHIP. CREATIVE COMMONS PROVIDES THIS
+            INFORMATION ON AN "AS-IS" BASIS. CREATIVE COMMONS MAKES NO WARRANTIES
+            REGARDING THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS
+            PROVIDED HEREUNDER, AND DISCLAIMS LIABILITY FOR DAMAGES RESULTING FROM
+            THE USE OF THIS DOCUMENT OR THE INFORMATION OR WORKS PROVIDED
+            HEREUNDER.
+          EOF
+          chmod 644 "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/copyright"
+
+          # Control file
+          mkdir -p "${DPKG_DIR}/DEBIAN"
+          cat > "${DPKG_DIR}/DEBIAN/control" <<EOF
+          Package: ${DPKG_BASENAME}
+          Version: ${DPKG_VERSION}
+          Section: utils
+          Priority: optional
+          Maintainer: ${{ env.PROJECT_MAINTAINER }}
+          Homepage: ${{ env.PROJECT_HOMEPAGE }}
+          Architecture: ${DPKG_ARCH}
+          Provides: ${{ env.PROJECT_NAME }}
+          Conflicts: ${DPKG_CONFLICTS}
+          Description: ${PROJECT_DESC}
+          EOF
+          DPKG_PATH="${DPKG_STAGING}/${DPKG_NAME}"
+          echo ::set-output name=DPKG_PATH::${DPKG_PATH}
+          echo "DPKG_PATH: ${DPKG_PATH}"
+          echo "> ls ${DPKG_STAGING}"
+          ls ${DPKG_STAGING}
+          # Build dpkg
+          fakeroot dpkg-deb --build "${DPKG_DIR}" "${DPKG_PATH}"
+
+      - name: Check file existence
+        id: pkg-exists
+        uses: andstor/file-existence-action@v1
+        with:
+          files: ${{ steps.package.outputs.PKG_PATH }}
+      - name: Upload tarball
+        uses: actions/upload-release-asset@v1.0.1
+        if: steps.pkg-exists.outputs.files_exists == 'true'
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_name: ${{ steps.package.outputs.PKG_NAME }}
+          asset_path: ${{ steps.package.outputs.PKG_PATH }}
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check file existence
+        id: dpkg-exists
+        if: steps.debian-package.outputs.DPKG_NAME
+        uses: andstor/file-existence-action@v1
+        with:
+          files: ${{ steps.debian-package.outputs.DPKG_PATH }}
+      - name: Upload Debian package
+        if: steps.debian-package.outputs.DPKG_NAME && steps.dpkg-exists.outputs.files_exists == 'true'
+        uses: actions/upload-release-asset@v1.0.1
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_name: ${{ steps.debian-package.outputs.DPKG_NAME }}
+          asset_path: ${{ steps.debian-package.outputs.DPKG_PATH }}
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

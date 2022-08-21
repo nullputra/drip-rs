@@ -1,0 +1,11 @@
+# Directories
+# ignore dot files/directories
+.*
+!/.github
+/target
+
+# Files
+!/.gitignore
+*.exe
+/cp.py
+/input.md
