@@ -19,6 +19,11 @@ pub struct Drip {
     pub misc: Option<Table>,
 }
 
+pub fn push_to_env_var(env_var: &mut Vec<(String, String)>, k: String, v: String) {
+    env_var.push((format!("${}", k), v.clone()));
+    env_var.push((format!("${{{}}}", k), v));
+}
+
 // Load config file
 pub fn load_drip(file_path: &str) -> Result<Drip> {
     let lines = fs::read_to_string(file_path)?;
@@ -39,12 +44,11 @@ pub fn load_drip(file_path: &str) -> Result<Drip> {
         let mut new_env_var = Vec::<(String, String)>::new();
         if let Some(env_var) = env_var {
             for (k, v) in env_var {
-                new_env_var.push((
-                    format!("${}", k),
-                    v.as_str()
-                        .expect("[env_var] only supports string")
-                        .to_owned(),
-                ));
+                let s = v
+                    .as_str()
+                    .expect("[env_var] only supports string")
+                    .to_owned();
+                push_to_env_var(&mut new_env_var, k, s);
             }
         }
         new_env_var

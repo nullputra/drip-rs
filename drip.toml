@@ -2,7 +2,7 @@ symbol = ">"
 
 [env_var]
 VERSION = "v1.0.0"
-COMMIT_MSG = "Release v1.0.0"
+COMMIT_MSG = "Update README.md"
 
 [exec]
 cpp = [
@@ -18,7 +18,7 @@ echo = "echo $0"
 echo_confirm = { common = "echo $0", confirm = true }
 # This is equivalent to the following:
 # echo_confirm = { cmd = "echo $0", sh = "echo $0", confirm = true }
-echo2 = ["echo $0", "echo $1"]
+echo2 = ["echo $0", "echo ${1}_$2"]
 push = { common = [
     "git add --all",
     'git commit -m "$COMMIT_MSG"',

@@ -5,9 +5,6 @@ mod run;
 use anyhow::{Context, Result};
 use std::process;
 
-fn push_to_env_var(env_var: &mut Vec<(String, String)>, k: String, v: String) {
-    env_var.push((k, v));
-}
 // Sort env_var by length of key in descending order
 fn sort_env_var(env_var: &mut Vec<(String, String)>) {
     env_var.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
@@ -15,7 +12,7 @@ fn sort_env_var(env_var: &mut Vec<(String, String)>) {
 
 fn main() -> Result<()> {
     ctrlc::set_handler(move || {
-        println!("Keyboard interrupt");
+        eprintln!("Keyboard interrupt");
         process::exit(0);
     })?;
 
@@ -39,15 +36,15 @@ fn main() -> Result<()> {
                 format!("failed to split file_path: {}", file_path)
             })?;
             // Add FILE_PATH, FILE_PATH_WITHOUT_EXT, FILE_EXT and args to env_var
-            push_to_env_var(&mut env_var, "$FILE_PATH".to_owned(), file_path.to_owned());
-            push_to_env_var(
+            drip::push_to_env_var(&mut env_var, "FILE_PATH".to_owned(), file_path.to_owned());
+            drip::push_to_env_var(
                 &mut env_var,
-                "$FILE_PATH_WITHOUT_EXT".to_owned(),
+                "FILE_PATH_WITHOUT_EXT".to_owned(),
                 file_path_without_ext.to_owned(),
             );
-            push_to_env_var(&mut env_var, "$FILE_EXT".to_owned(), file_ext.to_owned());
+            drip::push_to_env_var(&mut env_var, "FILE_EXT".to_owned(), file_ext.to_owned());
             for (i, arg) in args.iter().enumerate() {
-                push_to_env_var(&mut env_var, format!("${}", i), arg.to_owned());
+                drip::push_to_env_var(&mut env_var, i.to_string(), arg.to_owned());
             }
             sort_env_var(&mut env_var);
 
@@ -64,7 +61,7 @@ fn main() -> Result<()> {
         app::Commands::Misc { subsubcmd, args } => {
             // Add args to env_var
             for (i, arg) in args.iter().enumerate() {
-                push_to_env_var(&mut env_var, format!("${}", i), arg.to_owned());
+                drip::push_to_env_var(&mut env_var, i.to_string(), arg.to_owned());
             }
             sort_env_var(&mut env_var);
 

@@ -9,14 +9,14 @@ pub struct Cli {
 }
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Execute scripts according to extension
+    /// Execute code according to extension
     Exec {
         #[clap(value_parser)]
         file_path: String,
         #[clap(value_parser)]
         args: Vec<String>,
     },
-    /// Running scripts independent of extension
+    /// Run task(s)
     Misc {
         #[clap(value_parser)]
         subsubcmd: String,
